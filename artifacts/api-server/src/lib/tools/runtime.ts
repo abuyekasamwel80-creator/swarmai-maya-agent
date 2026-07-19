@@ -4,29 +4,53 @@ import { Octokit } from "@octokit/rest";
 import { db, githubConfigTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 
-export interface ToolCallPayload { toolId: string; args?: Record<string, unknown>; }
-export interface ToolExecutionResult { ok: boolean; toolId: string; data?: unknown; error?: string; source?: string; }
+export interface ToolCallPayload {
+  toolId: string;
+  args?: Record<string, unknown>;
+}
+
+export interface ToolExecutionResult {
+  ok: boolean;
+  toolId: string;
+  data?: unknown;
+  error?: string;
+  source?: string;
+}
 
 const memoryStore = new Map<string, unknown>();
 
-function getWorkspaceRoot() { return path.resolve(process.cwd(), "..", ".."); }
+function getWorkspaceRoot() {
+  return path.resolve(process.cwd(), "..", "..");
+}
+
 function ensureInsideWorkspace(targetPath: string) {
   const workspaceRoot = getWorkspaceRoot();
   const resolved = path.resolve(targetPath);
-  if (!resolved.startsWith(workspaceRoot)) throw new Error("Resolved path escapes the workspace root");
+  if (!resolved.startsWith(workspaceRoot)) {
+    throw new Error("Resolved path escapes the workspace root");
+  }
   return resolved;
 }
 
 async function getGitHubConfig() {
   const [config] = await db.select().from(githubConfigTable);
-  if (!config) return null;
-  return config as { token?: string | null; repoName?: string | null; repoUrl?: string | null; branch?: string | null };
+  if (!config) {
+    return null;
+  }
+  return config as {
+    token?: string | null;
+    repoName?: string | null;
+    repoUrl?: string | null;
+    branch?: string | null;
+  };
 }
 
 async function getOctokit() {
   const config = await getGitHubConfig();
   const token = config?.token ?? process.env.GITHUB_TOKEN ?? process.env.GITHUB_PAT;
-  if (!token) throw new Error("GitHub credentials are not configured");
+  if (!token) {
+    throw new Error("GitHub credentials are not configured");
+  }
   return new Octokit({ auth: token });
 }
 
@@ -34,7 +58,10 @@ async function listDirectory(args: Record<string, unknown>) {
   const target = typeof args.path === "string" ? args.path : ".";
   const resolved = ensureInsideWorkspace(path.resolve(getWorkspaceRoot(), target));
   const entries = await fs.readdir(resolved, { withFileTypes: true });
-  return entries.map((entry) => ({ name: entry.name, type: entry.isDirectory() ? "dir" : entry.isFile() ? "file" : "other" }));
+  return entries.map((entry) => ({
+    name: entry.name,
+    type: entry.isDirectory() ? "dir" : entry.isFile() ? "file" : "other",
+  }));
 }
 
 async function readFile(args: Record<string, unknown>) {
@@ -71,7 +98,12 @@ async function memorySet(args: Record<string, unknown>) {
 
 async function githubStatus() {
   const config = await getGitHubConfig();
-  return { connected: !!config?.token && !!config?.repoName, repoName: config?.repoName ?? null, repoUrl: config?.repoUrl ?? null, branch: config?.branch ?? "main" };
+  return {
+    connected: !!config?.token && !!config?.repoName,
+    repoName: config?.repoName ?? null,
+    repoUrl: config?.repoUrl ?? null,
+    branch: config?.branch ?? "main",
+  };
 }
 
 async function githubGetRepoInfo(args: Record<string, unknown>) {
@@ -120,15 +152,36 @@ async function githubPushFile(args: Record<string, unknown>) {
   const message = typeof args.message === "string" ? args.message : `SwarmAI: ${pathValue || "update"}`;
   const branch = typeof args.branch === "string" ? args.branch : "main";
   if (!pathValue || !content) throw new Error("path and content are required");
+
   const config = await getGitHubConfig();
   const repoName = typeof args.repo === "string" ? args.repo : config?.repoName ?? "";
   if (!repoName) throw new Error("GitHub repo is not configured");
+
   const [owner, repo] = repoName.split("/");
   if (!owner || !repo) throw new Error("GitHub repo must be in owner/repo format");
+
   let sha: string | undefined;
-  try { const { data } = await octokit.repos.getContent({ owner, repo, path: pathValue, ref: branch }); if (!Array.isArray(data) && "sha" in data) sha = data.sha; } catch {}
-  const { data } = await octokit.repos.createOrUpdateFileContents({ owner, repo, path: pathValue, message, content: Buffer.from(content).toString("base64"), branch, ...(sha ? { sha } : {}) });
-  return { htmlUrl: data.content?.html_url, commitSha: data.commit?.sha, path: pathValue, branch };
+  try {
+    const { data } = await octokit.repos.getContent({ owner, repo, path: pathValue, ref: branch });
+    if (!Array.isArray(data) && "sha" in data) sha = data.sha;
+  } catch {}
+
+  const { data } = await octokit.repos.createOrUpdateFileContents({
+    owner,
+    repo,
+    path: pathValue,
+    message,
+    content: Buffer.from(content).toString("base64"),
+    branch,
+    ...(sha ? { sha } : {}),
+  });
+
+  return {
+    htmlUrl: data.content?.html_url,
+    commitSha: data.commit?.sha,
+    path: pathValue,
+    branch,
+  };
 }
 
 const toolHandlers: Record<string, (args: Record<string, unknown>) => Promise<unknown>> = {
@@ -146,7 +199,19 @@ const toolHandlers: Record<string, (args: Record<string, unknown>) => Promise<un
 
 export async function executeTool(toolId: string, args: Record<string, unknown> = {}): Promise<ToolExecutionResult> {
   const handler = toolHandlers[toolId];
-  if (!handler) return { ok: false, toolId, error: `Unknown tool: ${toolId}` };
-  try { const data = await handler(args); return { ok: true, toolId, data, source: "runtime" }; }
-  catch (error) { return { ok: false, toolId, error: error instanceof Error ? error.message : String(error), source: "runtime" }; }
+  if (!handler) {
+    return { ok: false, toolId, error: `Unknown tool: ${toolId}` };
+  }
+
+  try {
+    const data = await handler(args);
+    return { ok: true, toolId, data, source: "runtime" };
+  } catch (error) {
+    return {
+      ok: false,
+      toolId,
+      error: error instanceof Error ? error.message : String(error),
+      source: "runtime",
+    };
+  }
 }
