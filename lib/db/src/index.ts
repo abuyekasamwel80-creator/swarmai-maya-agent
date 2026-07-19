@@ -4,6 +4,7 @@ import * as schema from "./schema";
 
 const { Pool } = pg;
 
+// Supabase direct connection URL (postgres://...) takes priority over DATABASE_URL
 const connectionString =
   process.env.SUPABASE_DB_URL ??
   process.env.DATABASE_URL;
@@ -80,14 +81,26 @@ function createInMemoryDb() {
 
   const createSelectBuilder = (table: unknown) => {
     let rows = getRows(table);
+    let whereClause: unknown;
+    let orderClause: unknown;
+
     const builder = {
-      where: (clause: unknown) => { rows = applyWhere(rows, clause); return builder; },
-      orderBy: (clause: unknown) => { rows = applyOrderBy(rows, clause); return builder; },
+      where: (clause: unknown) => {
+        whereClause = clause;
+        rows = applyWhere(rows, clause);
+        return builder;
+      },
+      orderBy: (clause: unknown) => {
+        orderClause = clause;
+        rows = applyOrderBy(rows, clause);
+        return builder;
+      },
       limit: async (count?: number) => rows.slice(0, count ?? rows.length),
       then: (resolve: (value: Array<Record<string, unknown>>) => unknown) => Promise.resolve(rows).then(resolve),
       catch: (reject: (reason?: unknown) => unknown) => Promise.resolve(rows).catch(reject),
       finally: (callback: () => void) => Promise.resolve(rows).finally(callback),
     };
+
     return builder;
   };
 
@@ -97,13 +110,17 @@ function createInMemoryDb() {
       state[key].push(value);
       return { rows: [value] };
     };
+
     return {
-      values: (value: Record<string, unknown>) => ({
-        onConflictDoNothing: async () => insert(value),
-        then: (resolve: (value: { rows: Array<Record<string, unknown>> }) => unknown) => Promise.resolve(insert(value)).then(resolve),
-        catch: (reject: (reason?: unknown) => unknown) => Promise.resolve(insert(value)).catch(reject),
-        finally: (callback: () => void) => Promise.resolve(insert(value)).finally(callback),
-      }),
+      values: (value: Record<string, unknown>) => {
+        const result = {
+          onConflictDoNothing: async () => insert(value),
+          then: (resolve: (value: { rows: Array<Record<string, unknown>> }) => unknown) => Promise.resolve(insert(value)).then(resolve),
+          catch: (reject: (reason?: unknown) => unknown) => Promise.resolve(insert(value)).catch(reject),
+          finally: (callback: () => void) => Promise.resolve(insert(value)).finally(callback),
+        };
+        return result;
+      },
     };
   };
 
@@ -130,7 +147,9 @@ function createInMemoryDb() {
   });
 
   return {
-    select: () => ({ from: (table: unknown) => createSelectBuilder(table) }),
+    select: () => ({
+      from: (table: unknown) => createSelectBuilder(table),
+    }),
     insert: (table: unknown) => createInsertBuilder(table),
     update: (table: unknown) => createUpdateBuilder(table),
     delete: (table: unknown) => createDeleteBuilder(table),
@@ -146,6 +165,7 @@ function createPool(): pg.Pool {
     connectionTimeoutMillis: 5_000,
   });
 
+  // Auto-reconnect: remove errored clients so the pool recovers automatically
   pool.on("error", (err) => {
     console.error("[db] idle client error — pool will recover:", err.message);
   });
