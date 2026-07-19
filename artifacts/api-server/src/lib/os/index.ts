@@ -1,9 +1,3 @@
-/**
- * SwarmAI Agent OS — Boot
- *
- * Registers all models in the rate limiter and exports the OS API.
- */
-
 import { ALL_MODELS } from "../models/registry.js";
 import { registerModel } from "./rate-limiter.js";
 
@@ -13,26 +7,13 @@ export { getFleetHealth } from "./capacity-monitor.js";
 
 let booted = false;
 
-/** Call once at server startup to register all models in the rate limiter */
 export function bootAgentOS() {
   if (booted) return;
   booted = true;
-
   let registered = 0;
   for (const model of ALL_MODELS) {
-    registerModel(model.id, {
-      rpm: model.rateLimitRpm,
-      concurrency: Math.max(1, Math.floor(model.rateLimitRpm / 10)),
-      provider: model.provider,
-    });
+    registerModel(model.id, { rpm: model.rateLimitRpm, concurrency: Math.max(1, Math.floor(model.rateLimitRpm / 10)), provider: model.provider });
     registered++;
   }
-
-  console.log(
-    `[AgentOS] Booted — ${registered} models registered across ${
-      ALL_MODELS.filter((m) => m.provider === "nvidia").length
-    } NVIDIA + ${
-      ALL_MODELS.filter((m) => m.provider === "openrouter").length
-    } OpenRouter models`,
-  );
+  console.log(`[AgentOS] Booted — ${registered} models registered across ${ALL_MODELS.filter((m) => m.provider === "nvidia").length} NVIDIA + ${ALL_MODELS.filter((m) => m.provider === "openrouter").length} OpenRouter models`);
 }
