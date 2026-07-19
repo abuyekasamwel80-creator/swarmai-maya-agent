@@ -1,13 +1,25 @@
+/**
+ * SwarmAI Agent OS — Rate Limiter
+ *
+ * Token bucket per model with sliding-window enforcement.
+ * Never lets a single call exceed the provider RPM cap.
+ *
+ * Key properties:
+ *  - Zero dropped requests — all excess requests queue and resolve automatically
+ *  - Per-provider global caps (provider-level safety valve)
+ *  - Exposes live utilization metrics for the dashboard
+ */
+
 export interface RateLimitConfig {
-  rpm: number;
-  concurrency: number;
+  rpm: number;          // requests per minute ceiling
+  concurrency: number;  // max simultaneous in-flight calls
   provider: "nvidia" | "openrouter";
 }
 
 interface BucketState {
-  tokens: number;
-  lastRefill: number;
-  inflight: number;
+  tokens: number;       // available tokens right now
+  lastRefill: number;   // timestamp of last refill (ms)
+  inflight: number;     // calls currently awaiting response
   waitQueue: Array<() => void>;
   totalRequests: number;
   totalQueued: number;
@@ -20,13 +32,22 @@ class TokenBucket {
 
   constructor(config: RateLimitConfig) {
     this.config = config;
-    this.state = { tokens: config.rpm, lastRefill: Date.now(), inflight: 0, waitQueue: [], totalRequests: 0, totalQueued: 0 };
+    this.state = {
+      tokens: config.rpm,
+      lastRefill: Date.now(),
+      inflight: 0,
+      waitQueue: [],
+      totalRequests: 0,
+      totalQueued: 0,
+    };
     this.scheduleRefill();
   }
 
   private scheduleRefill() {
+    // Refill tokens every second proportionally
     this.refillTimer = setInterval(() => {
-      this.state.tokens = Math.min(this.config.rpm, this.state.tokens + this.config.rpm / 60);
+      const { rpm } = this.config;
+      this.state.tokens = Math.min(rpm, this.state.tokens + rpm / 60);
       this.state.lastRefill = Date.now();
       this.drainQueue();
     }, 1000);
@@ -34,22 +55,34 @@ class TokenBucket {
   }
 
   private drainQueue() {
-    while (this.state.waitQueue.length > 0 && this.state.tokens >= 1 && this.state.inflight < this.config.concurrency) {
+    while (
+      this.state.waitQueue.length > 0 &&
+      this.state.tokens >= 1 &&
+      this.state.inflight < this.config.concurrency
+    ) {
       this.state.tokens -= 1;
       this.state.inflight += 1;
-      this.state.waitQueue.shift()!();
+      const resolve = this.state.waitQueue.shift()!;
+      resolve();
     }
   }
 
   async acquire(): Promise<void> {
     this.state.totalRequests++;
-    if (this.state.tokens >= 1 && this.state.inflight < this.config.concurrency) {
+
+    if (
+      this.state.tokens >= 1 &&
+      this.state.inflight < this.config.concurrency
+    ) {
       this.state.tokens -= 1;
       this.state.inflight += 1;
       return;
     }
+
     this.state.totalQueued++;
-    return new Promise((resolve) => { this.state.waitQueue.push(resolve); });
+    return new Promise((resolve) => {
+      this.state.waitQueue.push(resolve);
+    });
   }
 
   release(): void {
@@ -59,13 +92,27 @@ class TokenBucket {
 
   getStats() {
     const { rpm, concurrency, provider } = this.config;
-    const { tokens, inflight, waitQueue, totalRequests, totalQueued } = this.state;
-    return { provider, rpm, concurrency, tokensAvailable: Math.floor(tokens), inflight, queued: waitQueue.length, utilizationPct: Math.round((inflight / concurrency) * 100), totalRequests, totalQueued };
+    const { tokens, inflight, waitQueue, totalRequests, totalQueued } =
+      this.state;
+    return {
+      provider,
+      rpm,
+      concurrency,
+      tokensAvailable: Math.floor(tokens),
+      inflight,
+      queued: waitQueue.length,
+      utilizationPct: Math.round((inflight / concurrency) * 100),
+      totalRequests,
+      totalQueued,
+    };
   }
 
-  destroy() { if (this.refillTimer) clearInterval(this.refillTimer); }
+  destroy() {
+    if (this.refillTimer) clearInterval(this.refillTimer);
+  }
 }
 
+// ── Global rate limiter registry ──────────────────────────────────────────────
 const buckets = new Map<string, TokenBucket>();
 
 export function registerModel(modelId: string, config: RateLimitConfig) {
@@ -79,24 +126,39 @@ export async function acquireModel(modelId: string): Promise<void> {
   await bucket.acquire();
 }
 
-export function releaseModel(modelId: string): void { buckets.get(modelId)?.release(); }
+export function releaseModel(modelId: string): void {
+  buckets.get(modelId)?.release();
+}
 
 export function getAllStats() {
   const result: Record<string, ReturnType<TokenBucket["getStats"]>> = {};
-  for (const [id, bucket] of buckets) result[id] = bucket.getStats();
+  for (const [id, bucket] of buckets) {
+    result[id] = bucket.getStats();
+  }
   return result;
 }
 
 export function getProviderStats(provider: "nvidia" | "openrouter") {
-  let totalRpm = 0, totalInflight = 0, totalQueued = 0, totalRequests = 0;
+  let totalRpm = 0,
+    totalInflight = 0,
+    totalQueued = 0,
+    totalRequests = 0;
   for (const bucket of buckets.values()) {
     const s = bucket.getStats();
-    if (s.provider === provider) { totalRpm += s.rpm; totalInflight += s.inflight; totalQueued += s.queued; totalRequests += s.totalRequests; }
+    if (s.provider === provider) {
+      totalRpm += s.rpm;
+      totalInflight += s.inflight;
+      totalQueued += s.queued;
+      totalRequests += s.totalRequests;
+    }
   }
   return { provider, totalRpm, totalInflight, totalQueued, totalRequests };
 }
 
-export function getModelStats(modelId: string) { return buckets.get(modelId)?.getStats() ?? null; }
+export function getModelStats(modelId: string) {
+  return buckets.get(modelId)?.getStats() ?? null;
+}
+
 export function isModelAvailable(modelId: string): boolean {
   const bucket = buckets.get(modelId);
   if (!bucket) return false;
